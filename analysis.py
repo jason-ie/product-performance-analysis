@@ -1,4 +1,4 @@
-from utils import convert_column_headers, calculate_daily_inventory_changes
+from utils import convert_column_headers, exclude_missing_negatives, exclude_invalid_products, calculate_metrics, flag_halloween_sales, cluster_underperforming_products, analyze_underperforming_products
 import pandas as pd
 import os
 import matplotlib.pyplot as plt
@@ -11,19 +11,23 @@ Explore why these top 20 products consistently outperform the competition. Delve
 
 2. The Impact of Strategies and Events:
 
-Investigate whether there are any specific strategies or events that have played a significant role in influencing the sales performance of these products. Look beyond the obvious and seek hidden catalysts.
+Investigate whether there are any specific strategies or events that have played a significant role in influencing the sales performance of these products. Look beyond the obvious and seek hidden catalysts."""
 
-3. Recommendations for Improvement:
 
-Extend your analysis to products that are currently underperforming. What actionable recommendations can you provide to enhance their sales and overall performance?"""
 
-# Get the directory where the script is located
+""" --------------------------------------------------------------------------------------------------------------------
+Data Cleaning and Preprocessing"""
+# Load inventory data
 dir_path = os.path.dirname(os.path.realpath(__file__))
 file_path = os.path.join(dir_path, 'inventory.csv')
 inventory_df = pd.read_csv(file_path)
 
 # Convert Unix timestamp columns to human-readable dates
 inventory_df = convert_column_headers(inventory_df)
+# Exclude rows with more than 20% missing values
+inventory_df = exclude_missing_negatives(inventory_df, 20)
+# Exclude products with unreasonable inventory shifts
+inventory_df = exclude_invalid_products(inventory_df, 1000)
 
 # Interpolate missing values for numeric columns
 numeric_cols = inventory_df.select_dtypes(include=['float64', 'int64']).columns
@@ -33,24 +37,69 @@ inventory_df[numeric_cols] = inventory_df[numeric_cols].apply(pd.to_numeric, err
 inventory_df.ffill(axis=0, inplace=True)
 inventory_df.bfill(axis=0, inplace=True)
 
-# print(inventory_df.head())
+""" --------------------------------------------------------------------------------------------------------------------
+Identifying top 20"""
 
-# Calculate daily inventory changes
-daily_changes = calculate_daily_inventory_changes(inventory_df)
+# Flag products with Halloween sales, these are the categories likely to have increased sales in my opinion
+inventory_df = flag_halloween_sales(inventory_df, impacted_categories=['Gummy', 'Granola', 'Chocolate', 'Chips'])
 
-# Aggregate inventory changes to score products
-total_decrease = daily_changes[daily_changes < 0].sum(axis=1)  # Total decrease per product
-replenishment_count = (daily_changes > 0).sum(axis=1)  # Count of days with inventory increase
+# print(inventory_df.columns)
 
-# Simple scoring: Sum of total decrease (in magnitude) and replenishment count
-product_scores = total_decrease.abs() + replenishment_count
+# Calculate metrics
+sales_velocity, inventory_turnover_rate, replenishment_frequency, sustained_decreases = calculate_metrics(inventory_df.iloc[:, 4:]) # Inventory data starts from 5th column
 
-# Identify top 20 products based on scores
-top_20_indices = product_scores.nlargest(20).index
-top_20_products = inventory_df.loc[top_20_indices, 'Product']
+# Combine metrics into a DataFrame for scoring
+metrics_df = pd.DataFrame({
+    'Sales Velocity': sales_velocity,
+    'Inventory Turnover Rate': inventory_turnover_rate,
+    'Replenishment Frequency': replenishment_frequency,
+    'Sustained Decreases': sustained_decreases,
+    'Halloween_Flag': inventory_df['Halloween_Flag']
+})
+
+# Rank products within each metric
+ranks_df = metrics_df.rank(method='min', ascending=False)  # Lower rank = better performance
+
+# Calculate a combined score
+metrics_df['Combined Score'] = ranks_df.sum(axis=1)
+metrics_df['Product'] = inventory_df['Product']
+
+# Identify top 20 products based on the combined score
+halloween_bonus = 10  # How much I think Halloween would affect rankings
+metrics_df['Adjusted Score'] = metrics_df['Combined Score'] - (metrics_df['Halloween_Flag'] * halloween_bonus)
+top_20_products = metrics_df.sort_values('Adjusted Score').head(20).merge(inventory_df[['Product', 'Category', 'BrandId']], on='Product', how='left')
+
+top_categories = top_20_products.groupby('Category').size().sort_values(ascending=False)
+top_brands = top_20_products.groupby('BrandId').size().sort_values(ascending=False)
+
+print("Top Categories among Top 20 Products:\n", top_categories)
+print("\nTop Brands among Top 20 Products:\n", top_brands)
 
 print("Top 20 Performing Products:")
 print(top_20_products)
+
+""" --------------------------------------------------------------------------------------------------------------------
+3. Recommendations for Improvement:
+
+Extend your analysis to products that are currently underperforming. What actionable recommendations can you provide to enhance their sales and overall performance?"""
+
+# Cluster underperforming products
+underperforming_products, insights = cluster_underperforming_products(metrics_df)
+
+# Analyze underperforming products
+recommendations_df = analyze_underperforming_products(inventory_df, metrics_df)
+
+# Print insights for each cluster
+for cluster, insight in insights.items():
+    print(f"Cluster {cluster}:")
+    for k, v in insight.items():
+        print(f"  {k}: {v}")
+    print()
+    
+# Print recommendations for improvement, for now I only have one recommendation
+print("Recommendations for Improvement:")
+print(recommendations_df)
+
 # Check data types and missing values
 # print(inventory_df.info())
 
@@ -68,6 +117,3 @@ print(top_20_products)
 
 # Summary statistics to identify outliers
 # print(inventory_df.describe())
-
-# plot_distribution(inventory_df, 'sales_volume', 'Distribution of Sales Volume', 'Sales Volume', 'Frequency')
-# plot_time_series(inventory_df, 'date_column_name', 'sales_volume', 'Sales Volume Over Time', 'Date', 'Sales Volume')
